@@ -1,31 +1,36 @@
 // Michi-WaBot Creado por Noa 🐱
-
 const {
   default: makeWASocket,
-  useSingleFileAuthState,
+  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion
 } = require('@adiwajshing/baileys');
 
-const { state, saveState } = useSingleFileAuthState('./auth_info_multi.json');
-const qrcode = require('qrcode-terminal');
+const pino = require('pino');
 const fs = require('fs-extra');
 const ytdl = require('ytdl-core');
 const path = require('path');
 const os = require('os');
 const fetch = require('node-fetch');
+const { Boom } = require('@hapi/boom');
 
 async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_multi');
+
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`Usando Baileys v${version.join('.')}, latest: ${isLatest}`);
 
   const sock = makeWASocket({
     version,
-    auth: state,
-    printQRInTerminal: true
+    auth: {
+      creds: state.creds,
+      keys: state.keys
+    },
+    printQRInTerminal: true,
+    logger: pino({ level: 'silent' }), // Silencia los logs de Baileys
   });
 
-  sock.ev.on('creds.update', saveState);
+  sock.ev.on('creds.update', saveCreds);
 
   // Escuchar mensajes
   sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -109,9 +114,11 @@ async function startBot() {
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect } = update;
     if (connection === 'close') {
-      const reason = new DisconnectReason(lastDisconnect?.error)?.statusCode;
-      console.log('Desconectado, motivo:', reason);
-      startBot();
+      const shouldReconnect = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Desconectado. Razón:', lastDisconnect.error, ', reconectando:', shouldReconnect);
+      if (shouldReconnect) {
+        startBot();
+      }
     } else if (connection === 'open') {
       console.log('✅ Michi-WaBot conectado!');
     }
