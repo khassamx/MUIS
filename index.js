@@ -1,85 +1,74 @@
-// Este script soluciona los problemas de conexión, reconexión y QR en Baileys.
-// Usa useMultiFileAuthState para una gestión de sesión estable y sin necesidad de QR repetido.
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion
-} = require('@adiwajshing/baileys');
-
-const { Boom } = require('@hapi/boom');
+// index.js
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidNormalizedUser } = require('@adiwajshing/baileys');
 const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { Boom } = require('@hapi/boom');
+const { loadConfig, saveConfig } = require('./utils/configManager');
+const commands = require('./commands/index'); // Carga todos los comandos
+
+const CONFIG_FILE = './michi_config.json';
+let config = loadConfig(CONFIG_FILE);
 
 // Función principal que inicia el bot
 async function startBot() {
-  // Carga o crea las credenciales de la sesión
-  const { state, saveCreds } = await useMultiFileAuthState('./auth_info_multi');
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info_multi');
+    const { version, isLatest } = await fetchLatestBaileysVersion();
 
-  // Obtiene la última versión de Baileys
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`Usando Baileys v${version.join('.')}, última versión: ${isLatest}`);
+    console.log(`Usando Baileys v${version.join('.')}, última versión: ${isLatest}`);
 
-  // Crea la instancia del bot
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: true, // Esto muestra el QR solo si es necesario (primera conexión).
-    logger: pino({ level: 'silent' }),
-  });
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: true, // Esto muestra el QR solo si es necesario (primera conexión).
+        logger: pino({ level: 'silent' }),
+    });
 
-  // Maneja los eventos de la conexión
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    // Maneja los eventos de la conexión
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+            if (reason !== DisconnectReason.loggedOut) {
+                console.log('Conexión cerrada. Intentando reconectar...');
+                startBot();
+            } else {
+                console.log('¡Sesión cerrada! Borra la carpeta auth_info_multi y vuelve a escanear el QR.');
+            }
+        } else if (connection === 'open') {
+            console.log('✅ ¡Bot conectado y listo!');
+        }
+    });
 
-    if (qr) {
-      console.log('Escanea el QR para conectar. (Esto solo pasará la primera vez)');
-    }
+    // Maneja la actualización de las credenciales de sesión
+    sock.ev.on('creds.update', saveCreds);
 
-    if (connection === 'close') {
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+    // Maneja los mensajes
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        try {
+            const msg = messages[0];
+            if (!msg.message || (msg.key && msg.key.remoteJid === 'status@broadcast')) return;
 
-      if (reason !== DisconnectReason.loggedOut) {
-        console.log('Conexión cerrada. Intentando reconectar...');
-        startBot();
-      } else {
-        console.log('¡Sesión cerrada! Borra la carpeta auth_info_multi y vuelve a escanear el QR.');
-      }
-    } else if (connection === 'open') {
-      console.log('✅ ¡Bot conectado y listo!');
-    }
-  });
+            const from = msg.key.remoteJid;
+            const isGroup = from.endsWith('@g.us');
+            const sender = jidNormalizedUser(msg.key.participant || msg.key.remoteJid);
+            const text = (msg.message.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+            if (!text) return;
 
-  // Maneja la actualización de las credenciales de sesión
-  sock.ev.on('creds.update', saveCreds);
+            // Prefijos de comandos
+            const prefixes = ['!', '.', '/', '#'];
+            if (!prefixes.some(p => text.startsWith(p))) return;
+            const prefixUsed = prefixes.find(p => text.startsWith(p));
+            const args = text.slice(prefixUsed.length).trim().split(/ +/);
+            const cmd = args.shift().toLowerCase();
 
-  // Maneja los mensajes
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message) return;
+            // Llama al comando si existe en el objeto 'commands'
+            if (commands[cmd]) {
+                await commands[cmd].execute(sock, msg, args, isGroup, from, sender, config);
+            }
 
-    const from = m.key.remoteJid;
-    const type = Object.keys(m.message)[0];
-    const text = type === 'conversation' ? m.message.conversation : '';
-    const command = text.toLowerCase().trim();
-
-    // --- Comandos de prueba ---
-
-    if (command === 'setsms') {
-      const contactName = m.pushName || 'Usuario';
-      await sock.sendMessage(from, { text: `Hola ${contactName}, la autenticación con setsms ha sido exitosa.` });
-      console.log(`Mensaje de setsms enviado a ${contactName}.`);
-    }
-    
-    if (command === 'status') {
-        const estado = sock.user.id ? 'conectado' : 'desconectado';
-        await sock.sendMessage(from, { text: `Estado del bot: ${estado}.` });
-    }
-  });
+        } catch (err) {
+            console.error('Error manejando mensaje:', err);
+        }
+    });
 }
 
-// Inicia el bot
 startBot();
