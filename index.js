@@ -1,5 +1,5 @@
-// Este script soluciona los problemas de conexión (error 405) en Baileys.
-// Usa useMultiFileAuthState para una gestión de sesión más estable.
+// Este script soluciona los problemas de conexión y reconexión en Baileys.
+// Usa useMultiFileAuthState para una gestión de sesión más estable y segura.
 
 const {
   default: makeWASocket,
@@ -7,8 +7,12 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion
 } = require('@adiwajshing/baileys');
+
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 // Función principal que inicia el bot
 async function startBot() {
@@ -23,24 +27,27 @@ async function startBot() {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: true,
-    logger: pino({ level: 'silent' }), // Silencia los logs internos de Baileys para una salida más limpia
+    printQRInTerminal: true, // Esto muestra el QR en la terminal.
+    logger: pino({ level: 'silent' }), // Silencia los logs internos para una salida más limpia
   });
 
   // 4. Maneja los eventos de la conexión
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    if (qr) {
+      console.log('Escanea el QR para conectar.');
+    }
+
     // Si la conexión se cerró
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
-      // Si el motivo no es que el usuario se desconectó manualmente
       if (reason !== DisconnectReason.loggedOut) {
         console.log('Conexión cerrada. Intentando reconectar...');
         startBot(); // Llama a la función de nuevo para reconectar
       } else {
-        console.log('Desconectado. ¡Escanea el nuevo QR para volver a conectar!');
+        console.log('¡Se cerró sesión! Borra la carpeta auth_info_multi y vuelve a escanear el QR.');
       }
     } else if (connection === 'open') {
       console.log('✅ ¡Bot conectado y listo!');
@@ -58,9 +65,20 @@ async function startBot() {
     const from = m.key.remoteJid;
     const type = Object.keys(m.message)[0];
     const text = type === 'conversation' ? m.message.conversation : '';
+    const command = text.toLowerCase().trim();
 
-    if (text.toLowerCase() === 'hola') {
-      await sock.sendMessage(from, { text: '¡Hola! Soy tu bot, estoy funcionando perfectamente. 😊' });
+    // --- Comandos básicos ---
+
+    if (command === 'ping') {
+      await sock.sendMessage(from, { text: 'Pong! 🏓' });
+    }
+
+    if (command === 'hola') {
+      await sock.sendMessage(from, { text: '¡Hola! Soy un bot en Termux. ¿En qué puedo ayudarte? 😊' });
+    }
+
+    if (command === 'info') {
+      await sock.sendMessage(from, { text: 'Este bot está corriendo en la última versión de Baileys en Termux.' });
     }
   });
 }
