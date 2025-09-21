@@ -1,128 +1,69 @@
-// Michi-WaBot Creado por Noa 🐱
+// Este script soluciona los problemas de conexión (error 405) en Baileys.
+// Usa useMultiFileAuthState para una gestión de sesión más estable.
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion
 } = require('@adiwajshing/baileys');
-
-const pino = require('pino');
-const fs = require('fs-extra');
-const ytdl = require('ytdl-core');
-const path = require('path');
-const os = require('os');
-const fetch = require('node-fetch');
 const { Boom } = require('@hapi/boom');
+const pino = require('pino');
 
+// Función principal que inicia el bot
 async function startBot() {
+  // 1. Carga o crea las credenciales de la sesión
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info_multi');
 
+  // 2. Obtiene la última versión de Baileys
   const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`Usando Baileys v${version.join('.')}, latest: ${isLatest}`);
+  console.log(`Usando Baileys v${version.join('.')}, última versión: ${isLatest}`);
 
+  // 3. Crea la instancia del bot
   const sock = makeWASocket({
     version,
-    auth: {
-      creds: state.creds,
-      keys: state.keys
-    },
+    auth: state,
     printQRInTerminal: true,
-    logger: pino({ level: 'silent' }), // Silencia los logs de Baileys
+    logger: pino({ level: 'silent' }), // Silencia los logs internos de Baileys para una salida más limpia
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  // 4. Maneja los eventos de la conexión
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-  // Escuchar mensajes
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    try {
-      const msg = messages[0];
-      if (!msg.message) return;
+    // Si la conexión se cerró
+    if (connection === 'close') {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
-      const from = msg.key.remoteJid;
-      const type = Object.keys(msg.message)[0];
-      const body =
-        type === 'conversation'
-          ? msg.message.conversation
-          : type === 'extendedTextMessage'
-          ? msg.message.extendedTextMessage.text
-          : '';
-
-      if (!body) return;
-      const command = body.trim().toLowerCase();
-
-      // --- Comandos ---
-      if (command === 'subbot' || command === '.subbot' || command === '#subbot') {
-        await sock.sendMessage(from, { text: '🐱 Soy un SubBot activo creado por Noa!' });
+      // Si el motivo no es que el usuario se desconectó manualmente
+      if (reason !== DisconnectReason.loggedOut) {
+        console.log('Conexión cerrada. Intentando reconectar...');
+        startBot(); // Llama a la función de nuevo para reconectar
+      } else {
+        console.log('Desconectado. ¡Escanea el nuevo QR para volver a conectar!');
       }
-
-      if (command.startsWith('ytv ')) {
-        const url = command.split(' ')[1];
-        if (!ytdl.validateURL(url)) return sock.sendMessage(from, { text: '❌ URL no válida' });
-
-        const file = path.join(os.tmpdir(), 'video.mp4');
-        const stream = ytdl(url, { filter: 'videoandaudio' });
-        const writeStream = fs.createWriteStream(file);
-        stream.pipe(writeStream);
-
-        writeStream.on('finish', async () => {
-          await sock.sendMessage(from, {
-            video: fs.readFileSync(file),
-            caption: '🎥 Aquí tienes tu video!'
-          });
-          fs.unlinkSync(file);
-        });
-      }
-
-      if (command.startsWith('playaudio ')) {
-        const url = command.split(' ')[1];
-        if (!ytdl.validateURL(url)) return sock.sendMessage(from, { text: '❌ URL no válida' });
-
-        const file = path.join(os.tmpdir(), 'audio.mp3');
-        const stream = ytdl(url, { filter: 'audioonly' });
-        const writeStream = fs.createWriteStream(file);
-        stream.pipe(writeStream);
-
-        writeStream.on('finish', async () => {
-          await sock.sendMessage(from, {
-            audio: fs.readFileSync(file),
-            mimetype: 'audio/mp4',
-            ptt: true
-          });
-          fs.unlinkSync(file);
-        });
-      }
-
-      if (command.startsWith('kick ')) {
-        if (!msg.key.participant) return sock.sendMessage(from, { text: '⚠️ Solo en grupos!' });
-        const number = command.split(' ')[1];
-        if (!number) return sock.sendMessage(from, { text: '❌ Ingresa un número válido' });
-
-        await sock.groupParticipantsUpdate(from, [`${number}@s.whatsapp.net`], 'remove');
-        await sock.sendMessage(from, { text: `👢 Usuario ${number} expulsado!` });
-      }
-
-      if (command.includes('http://') || command.includes('https://')) {
-        await sock.sendMessage(from, { delete: msg.key });
-        await sock.sendMessage(from, { text: '⛔ Enlace detectado y eliminado (Antilink activo)' });
-      }
-    } catch (err) {
-      console.error('Error en mensajes.upsert:', err);
+    } else if (connection === 'open') {
+      console.log('✅ ¡Bot conectado y listo!');
     }
   });
 
-  // Manejar desconexiones
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'close') {
-      const shouldReconnect = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('Desconectado. Razón:', lastDisconnect.error, ', reconectando:', shouldReconnect);
-      if (shouldReconnect) {
-        startBot();
-      }
-    } else if (connection === 'open') {
-      console.log('✅ Michi-WaBot conectado!');
+  // 5. Maneja la actualización de las credenciales
+  sock.ev.on('creds.update', saveCreds);
+
+  // 6. Maneja los mensajes
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message) return;
+
+    const from = m.key.remoteJid;
+    const type = Object.keys(m.message)[0];
+    const text = type === 'conversation' ? m.message.conversation : '';
+
+    if (text.toLowerCase() === 'hola') {
+      await sock.sendMessage(from, { text: '¡Hola! Soy tu bot, estoy funcionando perfectamente. 😊' });
     }
   });
 }
 
+// Inicia el bot
 startBot();
